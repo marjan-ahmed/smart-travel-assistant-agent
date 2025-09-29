@@ -9,14 +9,32 @@ from typing import TypeVar, List
 from pydantic import BaseModel
 from dataclasses import dataclass
 
-load_dotenv()
+# Load .env from root directory
+env_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '.env')
+load_dotenv(env_path)
+
+# Also try to load from backend directory
+backend_env = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
+load_dotenv(backend_env)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
 
+print(f"Environment loaded - API Key starts with: {GEMINI_API_KEY[:10] if GEMINI_API_KEY else 'None'}...")
+print(f"Model: {GEMINI_MODEL}")
+print(f"Base URL: {BASE_URL}")
+
+# Check for conflicting environment variables
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if openai_api_key:
+    print(f"WARNING: OPENAI_API_KEY is set: {openai_api_key[:10]}...")
+    # Clear it to avoid conflicts
+    os.environ.pop("OPENAI_API_KEY", None)
+
 set_tracing_disabled(True)
 
+# Ensure we're using the Gemini API key explicitly
 client = AsyncOpenAI(api_key=GEMINI_API_KEY, base_url=BASE_URL)
 model= OpenAIChatCompletionsModel(GEMINI_MODEL, client)
 
@@ -46,37 +64,24 @@ class ToolLogger(RunHooks):
         print(f"[TOOL END] {tool_ctx.tool.name} returned {result}")
 
 
-class irrelevent_question(BaseModel):
-    question: str
-    irrelevent_word: str
-    
-guardrail_agent = Agent(
-    name="Irrelevent Question Checker",
-    instructions="Check if user enters words like hack",
-    output_type=irrelevent_question
-)
-
 @input_guardrail
 async def irrelevent_question_checker(ctx: RunContextWrapper[UserProfile], agent: Agent, input: str | list[TResponseInputItem]):
-    result = await Runner.run(guardrail_agent, input, context=ctx.context)
+    # Simple keyword-based check for inappropriate content
+    if isinstance(input, str):
+        blocked_words = ["hack", "exploit", "virus", "malware"]
+        if any(word in input.lower() for word in blocked_words):
+            return GuardrailFunctionOutput(
+                output_info="Blocked inappropriate content",
+                tripwire_triggered=True
+            )
     
-    return GuardrailFunctionOutput (
-        output_info=result.final_output,
-        tripwire_triggered=result.final_output.irrelevent_word
+    return GuardrailFunctionOutput(
+        output_info="Content is appropriate",
+        tripwire_triggered=False
     )
 
-@function_tool
-def fetch_weather(location: str) -> str:
-    return f"the weather of {location} is {random.randint(-10, 34)}°C"
-
-T = TypeVar('T') # it could be string or list of string Lisst[str]
-
-@function_tool(strict_mode=True, description_override="Ask user about the city and cuisine")
-def restaurant_finder(cuisine: str) -> List[T] :
-  return [
-        {"name": "Green Leaf", "cuisine": "Vegan", "rating": 4.7},
-        {"name": "Pizza Roma", "cuisine": "Italian", "rating": 4.5}
-    ]
+# Temporarily removed function tools to avoid compatibility issues
+# We'll re-add them later using a different approach
     
 BudgetAgent: Agent = Agent(
     name="Budget Assistant",
@@ -87,9 +92,16 @@ BudgetAgent: Agent = Agent(
 
 TravelAgent: Agent = Agent(
     name="Smart Travel Assistant",
-    instructions="Assist users in planning trips with weather, restaurants, and itineraries.",
+    instructions="""You are a helpful travel assistant. Help users with:
+    - Travel planning and itineraries
+    - Weather information (provide general guidance)
+    - Restaurant recommendations (suggest popular options)
+    - Transportation advice
+    - Local attractions and activities
+    
+    Be friendly, informative, and helpful. If asked about weather, provide general seasonal information.
+    For restaurants, suggest popular cuisines and dining areas in the mentioned city.""",
     model=model,
-    tools=[fetch_weather, restaurant_finder],
     handoffs=[BudgetAgent],
     handoff_description="If the user asks budget-specific queries, handoff to a BudgetAgent",
     input_guardrails=[irrelevent_question_checker]
@@ -97,7 +109,8 @@ TravelAgent: Agent = Agent(
 
 async def main() -> None:
     user_profile = UserProfile(name="Marjan Ahmed", preferences=["vegan", "museums"]) 
-    result = Runner.run_streamed(TravelAgent, dynamic_instructions, context=user_profile, hooks=tool_log, run_config=RunConfig(model))
+    tool_logger = ToolLogger()
+    result = Runner.run_streamed(TravelAgent, dynamic_instructions, context=user_profile, hooks=tool_logger, run_config=RunConfig(model))
     
     try: 
         async for event in result.stream_events():

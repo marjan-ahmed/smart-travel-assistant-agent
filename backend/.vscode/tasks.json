@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run FastAPI backend",
+			"type": "shell",
+			"command": "uvicorn src.smart_travel_assistant_agent.api:app --host 0.0.0.0 --port 8000 --reload",
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
